@@ -39,7 +39,7 @@ class Cell:
 
     @property
     def unpacker(self):
-        return (self.row, self.col, self.frame)
+        return self.row, self.col, self.frame
 
 
 class Ship:
@@ -75,7 +75,7 @@ class Ship:
 # немного лирики:
 # чтобы сделать неограниченную размерность доски, необходимо дополнить буквенный ряд
 # нужно помнить, что на отображение индексов колонок и строк отведено всего 3 знакоместа, дальше доска может расползтись
-# к тому же, где взять столько букв? буквенный индекс состоит из одного символа
+# к тому же, где взять столько букв? буквенный индекс закладывался односимвольным
 # изначально параметр размера зафиксируем на классической отметке 10
 # а пока размер доски ограничен буквенным рядом из 28 символов
 class Bay:
@@ -89,6 +89,7 @@ class Bay:
         self.ships = []
         self.busy = []
         self.sunken_ships = 0
+        self.hurt_ship = []
 
     def draw_bay(self, can_see: bool = False):
         result = [" "*4 + " ".join([f"{i:^3}" for i in self.letters[:self.size]])]
@@ -123,7 +124,7 @@ class Bay:
     def put_ship(self, ship):
         # проверка - все ли клетки корабля помещаются на доске
         for c in ship.cells:
-            if self.out(c) or c in self.busy:
+            if self.is_out(c) or c in self.busy:
                 raise BoardWrongShipException()
         # если на проверке не словили исключение, добавляем в бухту
         for c in ship.cells:
@@ -138,18 +139,16 @@ class Bay:
             for dr in range(-1, 2):
                 for dc in range(-1, 2):
                     cell = Cell(c.row + dr, c.col + dc)
-                    if not (self.out(cell) or cell in self.busy):
+                    if not (self.is_out(cell) or cell in self.busy):
                         self.busy.append(cell)
                         if mark_with:
                             self.cells[cell.row][cell.col] = mark_with
 
-    def out(self, d):
-        """
-        Проверка координат на выход за границы доски
-        :param d:
-        :return:
-        """
+    def is_out(self, d):
         return not ((0 <= d.row < self.size) and (0 <= d.col < self.size))
+
+    def is_out_or_busy(self, d):
+        return self.is_out(d) or d in self.busy
 
     @property
     def capacity(self):
@@ -158,7 +157,7 @@ class Bay:
         :return: list[int]
         """
         result = []
-        # в классической игре 10*10 кораблей: 1 четырёхпалубник, 2 трёхпалубника, 3 двухпалубника и 4 однопалубника
+        # В классической игре 10*10 кораблей: 1 четырёхпалубник, 2 трёхпалубника, 3 двухпалубника и 4 однопалубника
         # итого 4 + 2*3 + 3*2 + 4 = 20 палуб на доске в 100 клеток, т.е. 20% поля занимают корабли
         decks = int(self.size * self.size * 0.2)
         i = 1
@@ -173,7 +172,7 @@ class Bay:
         return result
 
     def shot(self, cell):
-        if self.out(cell):
+        if self.is_out(cell):
             raise BoardOutException()
 
         if cell in self.busy:
@@ -188,8 +187,10 @@ class Bay:
                     self.sunken_ships += 1
                     self.displacement(ship, "·")
                     self.__event.message = "Убит :.("
+                    self.hurt_ship = []
                 else:
                     self.__event.message = "Ранен :("
+                    self.hurt_ship.append(cell)
                 return True
 
         self.cells[cell.row][cell.col] = "•"
@@ -238,14 +239,64 @@ class Human(Player):
             col = self.my_bay.letters.index(pos[0:i + 1])
             return Cell(row, col)
 
-    def show_board(self):
-        lines = list(zip(self.my_bay.draw_bay(True), self.enemy_bay.draw_bay()))
+    def show_board(self, is_fin=False):
+        lines = list(zip(self.my_bay.draw_bay(True), self.enemy_bay.draw_bay(is_fin)))
         print("\n".join([x + " " * 10 + y for x, y in lines]))
 
 
 class Cyber(Player):
     def ask(self):
-        cell = Cell(randint(0, self.my_bay.size - 1), randint(0, self.my_bay.size - 1))
+        if self.enemy_bay.hurt_ship:
+            # попытка добить корабль, раненый с прошлого выстрела
+            probably = []
+            if len(self.enemy_bay.hurt_ship) == 1:
+                # проверить на предмет занятости клетки в четырёх направлениях
+                # и собрать из свободных клеток множество для вероятного выстрела
+                for i in [-1, 1]:
+                    cell = Cell(self.enemy_bay.hurt_ship[0].row + i, self.enemy_bay.hurt_ship[0].col)
+                    if not self.enemy_bay.is_out_or_busy(cell):
+                        probably.append(cell)
+                    cell = Cell(self.enemy_bay.hurt_ship[0].row, self.enemy_bay.hurt_ship[0].col + i)
+                    if not self.enemy_bay.is_out_or_busy(cell):
+                        probably.append(cell)
+            else:
+                # на основе первого и последнего ранений определить ориентацию корабля в пространстве
+                # определить индексы боковых клеток
+                # и в множество вероятностей добавить две клетки по краям согласно их незанятости
+                if self.enemy_bay.hurt_ship[0].row == self.enemy_bay.hurt_ship[-1].row:
+                    # корабль расположен горизонтально
+                    r = self.enemy_bay.hurt_ship[0].row
+                    # поиск боковых клеток
+                    sorted_shots = sorted(self.enemy_bay.hurt_ship, key=lambda x: x.col)
+                    # клетки слева и справа от боковых выбираются в качестве вариантов
+                    orient = sorted_shots[0].col - sorted_shots[1].col
+                    cell = Cell(r, sorted_shots[0].col + orient)
+                    if not self.enemy_bay.is_out_or_busy(cell):
+                        probably.append(cell)
+                    cell = Cell(r, sorted_shots[-1].col - orient)
+                    if not self.enemy_bay.is_out_or_busy(cell):
+                        probably.append(cell)
+
+                if self.enemy_bay.hurt_ship[0].col == self.enemy_bay.hurt_ship[-1].col:
+                    # корабль расположен вертикально
+                    c = self.enemy_bay.hurt_ship[0].col
+                    # поиск боковых клеток
+                    sorted_shots = sorted(self.enemy_bay.hurt_ship, key=lambda x: x.row)
+                    orient = sorted_shots[0].row - sorted_shots[1].row
+                    cell = Cell(sorted_shots[0].row + orient, c)
+                    if not self.enemy_bay.is_out_or_busy(cell):
+                        probably.append(cell)
+                    cell = Cell(sorted_shots[-1].row - orient, c)
+                    if not self.enemy_bay.is_out_or_busy(cell):
+                        probably.append(cell)
+            # из списка вариантов выбираем случайный
+            cell = random.choice(probably)
+        else:
+            while True:
+                cell = Cell(randint(0, self.my_bay.size - 1), randint(0, self.my_bay.size - 1))
+                if cell not in self.enemy_bay.busy:
+                    break
+
         print(f"мой ход ->{self.my_bay.letters[cell.col]}{cell.row + 1}")
         return cell
 
@@ -254,7 +305,6 @@ class Cyber(Player):
 class LastEvent:
     def __init__(self):
         self.message = ""
-        self.hurt_ship = []
 
     def __str__(self):
         return self.message
@@ -326,7 +376,7 @@ class Game:
 
             turn += 1
 
-        self.human.show_board()
+        self.human.show_board(True)
         print(self.__event)
 
     def start(self):
@@ -336,4 +386,3 @@ class Game:
 
 g = Game()
 g.start()
-
